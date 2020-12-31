@@ -1,0 +1,309 @@
+AUTHOR:         Scott Czepiel <sczepiel at gmail dot com>
+
+DATE:           2017-09-04
+
+LICENSE:        GNU Free Documentation License Version 1.2
+
+SYNOPSIS:       How to run Linux From Scratch on Amazon EC2
+
+DESCRIPTION:    This hint will demonstrate how to run your own LFS on an
+                instance in Amazon's Elastic Compute Cloud (EC2).
+
+PREREQUISITES:  * Amazon Web Services account.
+
+HINT:
+
+You run LFS at home, why not run LFS in the cloud?  Building Linux From Scratch
+on a computer at home is a wonderfully rewarding learning experience, but there
+are many more things that you will learn by managing a server directly connected
+to the internet.  Providers of virtual private servers (VPS) will typically
+limit you to one of the major linux distributions.  With Amazon's EC2 service,
+you can build your own custom operating system image.  The purpose of this hint
+is to introduce you to EC2 and demonstrate how you can run Linux From Scratch on
+your own server instance in EC2.
+
+To accomplish this goal, we are going to build a custom EBS-Backed 64-bit HVM
+AMI.  Don't worry if none of that makes any sense to you, by the end of this
+hint you will understand how EC2 works and how you can take complete control of
+your own operating system in the cloud.
+
+For those who are already familiar with EC2 and as a quick overview of how we
+will build LFS on EC2, here are all the steps we will follow.  First, we will
+prepare a LFS filesystem either using one you have already built or following
+the book all the way up to the kernel build in Chapter 8.  We will add a few
+essential BLFS packages, namely openssh and dhcpcd.  Once our LFS system is
+staged, we'll make a tar archive of it.  Next, we'll launch a new temporary EC2
+instance to package our build, create a new EBS volume, attach it to the
+instance, then build a MBR and partition table on the EBS volume.  Untar our LFS
+snapshot, create the virtual filesystems, rebuild the kernel, install grub, and
+setup ssh pubkey authentication.  We'll review a few essential system
+configuration files to customize our LFS system to run as its own host on the
+internet.  When our customizations are complete, we'll unmount the EBS volume,
+create a snapshot, then create an AMI from the snapshot.  The final step is to
+launch a new EC2 instance using our custom AMI.  At last you will have your own
+Linux From Scratch running in the cloud!
+
+Background:
+
+EC2 is Amazon's Elastic Compute Cloud, part of Amazon Web Services (AWS),
+providing on-demand virtual private servers called "instances" which can run in
+one of many data centers across the world.  There are various instance types
+which range from the very small t2.nano providing one virtual CPU and 500 MiB of
+memory, to the very large x1.16xlarge with 64 CPU cores and 976 GiB.  The
+'elasticity' in the name refers to the ease with which you can quickly scale up
+or down according to your computing needs.  Instances can be launched and
+managed from the command line or through the web interface of Amazon Web
+Services' management console. AWS offers an introductory free tier for new
+customers providing more than enough compute resources to host a low traffic
+website for 12 months.  It's an excellent way to try out the various services
+and learn as much as you can.
+
+Under the hood, EC2 instances run as guest domains on hosts running the Xen
+hypervisor.  The hypervisor manages each guest's access to CPU, memory, network,
+and disk I/O so that in most situations your OS can act as if it is running on
+actual hardware.  Unlike shared hosting environments, each guest domain is
+completely independent and you have full root access, a dedicated block
+device for storage, and your own private reserved memory.  Guest operating
+systems can run either as paravirtual (PV) or hardware-assisted (HVM).  In
+recent years, due to driver advances in the hypervisor, HVM has become the
+preferred method of virtualization in EC2.  In fact, for some instance types,
+notably the general purpose "t2" family of instances, HVM is the only supported
+virtualization method.  This is actually the most flexible option because HVM
+guests require no special modifications to run in a virtualized environment.
+From the kernel's perspective, an HVM OS is running on bare metal.
+
+Root volume storage for guests has also evolved over time from ephemeral
+directly-attached "instance stores" to persistent network-attached Elastic Block
+Storage (EBS).  An EBS volume is a dedicated partition of a network disk,
+usually an SSD, which you can provision as the root volume of your guest OS. 
+Since EBS volumes exist independently of running EC2 instances, this makes it
+possible to stop an instance and re-launch it on a completely different host.
+
+All EC2 instances must be launched from an Amazon Machine Image (AMI).  You can
+think of this as an ISO that would be created on a CD or DVD containing a
+bootable operating system.  Many of the major linux distributions now release
+"cloud images" in various formats, one of which is the AMI so that their OS can
+run on EC2.  Amazon has made it very easy to create an HVM AMI by simply taking
+a snapshot of an EBS volume.  To make a PV AMI requires an additional step of
+associating an AKI (Amazon Kernel Image) and configuring a custom bootloader
+(usually pvgrub) inside the guest OS.  For an HVM AMI, however, it is sufficient
+to simply partition the EBS volume with a master boot record and install grub
+directly to the MBR as if it were a physical disk.  Then, we can build any OS we
+like on the EBS volume.
+
+Hopefully this background has explained the basic process of creating a custom
+OS to run in EC2.  In the next section, we will walk through all the steps in
+creating our custom EBS-Backed 64-bit HVM AMI running Linux From Scratch.
+
+
+Details:
+
+Now that you have some familiarity with EC2, and I trust you are already
+familiar with LFS, let's see how we can put the two together.  The first place
+we need to start is by preparing a 64-bit LFS build.  There is no need to build
+LFS again if you already have a build running, nor is it required to perform the
+build in EC2 itself.  There are a few things to keep in mind when preparing your
+build.  As of this writing, EC2 hosts use Intel Xeon processors.  This doesn't
+mean you need a Xeon at home, as long as you compile for an x86_64 target and
+stick to the default optimizations.  Using more aggressive compiler
+optimizations might result in binaries that will not run in EC2 unless you have
+the same processor family available.
+
+If starting from scratch with a new build, follow the LFS book all the way up to
+building the kernel in Chapter 8.  If building from home, we won't build the
+kernel just yet, since we will want to be actually running on an EC2 instance to
+get a better idea of what hardware options we need to configure.  Before
+continuing, we'll need a little bit of BLFS as well.  Since we can't connect to
+an EC2 instance using the console, we'll need to use ssh, so install OpenSSL
+and OpenSSH from BLFS.  We will also need to install and configure dhcpcd since
+EC2 instances are initially dynamically assigned an IP address (later, you can
+allocate a static IP address to assign to a running instance, see
+documentation for Amazon's Elastic IP Addresses).
+
+At this stage we are ready to take a snapshot of our LFS filesystem and complete
+the remainder of the preparations from a running EC2 instance.  Exit the chroot
+environment and unmount the virtual filesystems as described in Chapter 9 of the
+LFS book.  Now we'll create a tar archive.  If performing this step on a running
+LFS system, you may want to reboot into single-user mode to ensure that all
+files in the archive are in a consistent state.  See the "Backing up LFS" Hint
+by Mike McCarty for more information.
+
+cd /mnt/lfs
+tar czpf /lfs-snapshot.tgz \
+    --exclude=/boot         \
+    --exclude=/dev          \
+    --exclude=/lost+found   \
+    --exclude=/media        \
+    --exclude=/mnt          \
+    --exclude=/proc         \
+    --exclude=/run          \
+    --exclude=/sys          \
+    --exclude=/tmp          \
+    /
+
+In order to package our LFS filesystem into a fully functioning AMI, we need to
+move it to an EBS volume and perform the final preparations from a running EC2
+instance.  Launch a new EC2 instance using whatever linux distribution you are
+comfortable with.  It may simplify things to choose a distro with a kernel
+version that is close to the one you're using in LFS.  The reason is that we
+will examine the running kernel to see what modules we need to build to run on
+EC2.  
+
+Once your instance is up and running and you're able to ssh into it, use scp to
+transfer your archive to the instance.  Since the archive is likely several
+hundred megabytes, this may take awhile.  In the meantime, we will prepare a new
+EBS volume to serve as the root filesystem for LFS.  Create a new EBS volume in
+the same availability zone as your running instance (otherwise you won't be
+able to attach it).  The volume only needs to be large enough to store the
+uncompressed archive with some extra room to compile the kernel.  Attach the
+volume to your running instance and once that's done, use 'lsblk' to determine
+the device node where the new block device is recognized by the kernel.
+
+$ lsblk
+NAME    MAJ:MIN RM SIZE RO TYPE MOUNTPOINT
+xvda    202:0    0  10G  0 disk 
+  xvda1 202:1    0  10G  0 part /
+xvdf    202:80   0   6G  0 disk 
+
+For linux instances on EC2, the root volume will most likely be located at
+/dev/xvda and a newly attached EBS volume will appear as /dev/xvdf ('xvd' stands
+for Xen Virtual Block Device).  Next we need to create a master boot record and
+new partition table on the device.  We need an MBR because of the way HVM
+virtualization works in Xen.  When starting a guest domain, the hypervisor
+expects to be presented with a disk image--not merely a partition--with its own
+boot loader installed on its own MBR.  Then we'll create a primary linux
+partition using all available space.  If using fdisk, use 'o' to create a DOS
+partition table, 'n' followed by 'p' to create a new primary partition.  In
+parted, use 'mklabel msdos' and then 'mkpart primary ext4 0% 100%'.  After
+writing the partition table, make an ext4 filesystem and then mount at /mnt/lfs.
+As root on your EC2 instance:
+
+mkfs.ext4 -F /dev/xvdf1
+export LFS=/mnt/lfs
+mkdir -v $LFS
+mount -v -t ext4 /dev/xvdf1 $LFS
+
+By now hopefully the scp transfer of your archive file is complete.  Move it to
+$LFS and uncompress.  Delete the tgz file because we no longer need it, we now
+have the foundation of our LFS filesystem with just a few additional steps to
+turn it into a bootable OS that will run on EC2.  In short, those steps are: 
+
+* create the virtual filesystem directories
+* build the kernel
+* install and configure grub
+* edit system configuration files
+
+First, we need to create additional required directories not present in the
+archive.  Explanations can be found in Chapter 6.2 "Preparing Virtual Kernel
+File Systems".
+
+cd /mnt/lfs
+mkdir -pv {dev,proc,sys,run}
+mkdir -pv mnt
+mkdir -pv media/{floppy,cdrom}
+install -dv -m 1777 tmp
+ln -sv run var/run
+ln -sv run/lock var/lock
+mknod -m 600 dev/console c 5 1
+mknod -m 666 dev/null c 1 3
+mkdir -v boot
+
+Note that we didn't keep the /boot directory in our archive because anything in
+there from our build system is irrelevant.  We'll recreate everything we need in
+/boot very soon.
+
+For the next steps (compiling the kernel and installing grub), we'll want to
+enter a chroot environment.  Follow the steps as explained in the "Cleaning Up"
+section of Chapter 6 of the LFS book on how to re-enter the chroot
+environment, including bind mounting the virtual filesystems.
+
+Once in chroot, we'll build a kernel.  The best way to decide what to configure
+is to examine the currently loaded kernel modules in your running EC2 instance.
+Refer to Greg Kroah-Hartman's excellent book "Linux Kernel in a Nutshell"
+(linked in the LFS book) to get modprobe to list all the loaded kernel modules
+and then grep the kernel source to find which configuration option will enable
+them.
+
+for i in `find /sys/ -name modalias -exec cat {} \;`; do
+    /sbin/modprobe --config /dev/null --show-depends $i ;
+done | rev | cut -f 1 -d '/' | rev | sort -u
+
+find -type f -name Makefile | xargs grep module_name
+
+You should also review the configuration options required for Xen guest domains
+here:
+
+https://wiki.xenproject.org/wiki/Mainline_Linux_Kernel_Configs
+
+Configuring the kernel can take a lot of research so be patient and read the
+docs!
+
+After building the kernel and copying it to /boot, install grub to the MBR of
+the attached EBS volume:
+
+grub-install /dev/xvdf
+
+The final step is to review some essential system configuration files:
+
+/boot/grub/grub.cfg
+/etc/fstab
+/etc/sysconfig/ifconfig.eth0
+/etc/ssh/sshd_config
+/etc/hosts
+/etc/passwd
+/etc/group
+etc...
+
+Starting with the grub.cfg as listed in the book, you'll want to make two
+important changes.  First, use 'set root=(hd0,1)' because we only have one
+partition in our virtual disk.  Second, in the menuentry linux line for your
+kernel, specify 'root=/dev/xvda1 ro', because when the LFS system is booted in
+EC2, the primary volume will be known to the kernel as xvda, not xvdf.
+
+Likewise, in /etc/fstab, your root mount point should point to /dev/xvda1.
+
+Ensure that ifconfig.eth0 is setup according to the instructions for dhcpcd. 
+In EC2, the network interface will always be known as the device name 'eth0'. 
+
+Your sshd config should be setup for pubkey authentication.  It is possible to
+use EC2's "instance metadata" feature to install keys in rc.site on first boot,
+but the easy hacky way to do this quickly is to simply copy the key you used to
+setup your staging instance to ~/.ssh/authorized_keys in your LFS filesystem
+under the user with which you intend to connect.
+
+When finished with all the tweaks, logout of the chroot environment and unmount
+the volume.  Using the AWS management console, detach the volume from the
+running instance, create a snapshot of the volume, and finally create an AMI
+from the snapshot.  Ensure that your AMI remains private to your account!
+
+When the new LFS AMI has been created, you can now launch a new instance from
+the AMI.  Since we haven't installed any packet filtering, you'll want to be
+very careful with the EC2 security group.  To start with, you should only allow
+inbound ssh traffic from your home IP address.  When the AWS console shows that
+your instance is running, try connecting to it using the "public DNS" address
+with your ssh key.  If you're unable to connect, from the AWS console look at
+Actions -> Instance Settings -> Get Instance Screenshot to see if anything is
+appearing on the virtual console of your instance.  If anything needs fixing,
+power down the instance and go back to your original staging instance.  Attach
+the volume, mount it, and review the system configuration files again.
+
+
+ACKNOWLEDGEMENTS:
+
+* The AWS EC2 documentation is well-written and concise:
+http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html
+
+* The Fedora Cloud SIG has an old wiki page discussing early efforts at bringing
+Fedora images to EC2, along with a shell script that automates most of the
+process.  Note, however, that the script is assuming PV virtualization which we
+are not using here, so not all steps are applicable (pvgrub, AKI install).
+https://fedoraproject.org/wiki/Publishing_image_to_EC2
+https://github.com/dazed1/pvgrub2ebs/blob/master/createfedorabootebs.sh
+
+* Debian uses a very sophisticated python program for creating its cloud images.
+ It is very abstract but you may find some ideas here as well:
+ https://github.com/andsens/bootstrap-vz
+
+CHANGELOG:
+[2017-09-04]
+  * Initial hint.

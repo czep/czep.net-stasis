@@ -1,0 +1,595 @@
+###
+### ACS 2015 analysis of Age and Tech Occupations
+### http://czep.net/16/age-and-tech.html
+### 
+### Scott Czepiel <sczepiel@gmail.com>
+### 24 Dec 2016
+###
+
+# This analysis uses the ACS 2015 sample as extracted from the IPUMS project.
+# IPUMS-USA, University of Minnesota, www.ipums.org.
+
+# The dataset was prepared by loading the extract into PostgreSQL using:
+# http://czep.net/data/ipums_data_prep/
+
+###
+### R environment setup
+###
+
+# environment
+rm(list = ls())
+Sys.setenv(TZ='UTC')
+options(width=160)
+options("scipen"=8)
+setwd("~/work/ipums")
+
+# packages
+library(RJDBC)
+library(Hmisc)
+library(ggplot2)
+library(scales)
+library(broman)
+library(RPostgreSQL)
+
+###
+### extract from local postgres
+###
+
+driver <- dbDriver("PostgreSQL")
+conn <- dbConnect(driver, dbname = "ipums", host = "localhost", port = 5432, user = "xxxxxx")
+
+q1 <- "
+select
+	p.perwt,
+	p.age,
+	p.empstat,
+	p.occ,
+	p.ind,
+	p.wkswork2,
+	p.uhrswork,
+	p.incwage,
+from
+	acs2015_per p
+;"
+
+q2 <- "
+select
+	value,
+	label
+from
+	acs2015_vals
+where
+	varname = 'OCC'
+order by 1
+;"
+
+acs <- dbGetQuery(conn, q1)
+occlabs <- dbGetQuery(conn, q2)
+dbDisconnect(conn)
+dbUnloadDriver(driver)
+
+### verify unweighted case count
+> nrow(acs)
+[1] 3147005
+
+save(acs, file = "~/data/acs2015_e1.Rdata")
+save(occlabs, file = "~/data/occlabs.Rdata")
+
+# load(file = "~/data/acs2015_e1.Rdata")
+# load(file = "~/data/occlabs.Rdata")
+
+
+###
+### Utility functions
+###
+
+freq <- function(t, noquote=TRUE) {
+    pt <- prop.table(t)
+    res <- cbind(
+        format(round(t, digits=0), big.mark=',', scientific=999),
+        format(round(100.0 * pt, digits=2)),
+        format(round(100.0 * cumsum(pt), digits=2))
+    )
+    colnames(res) <- c('Count', 'Percent', 'CumePct')
+    if (noquote == TRUE) {
+        noquote(res)
+    }
+    else {
+        res
+    }
+}
+
+crosstab <- function(t, digits=2, margin=NULL, noquote=TRUE) {
+    pt <- prop.table(t, margin=margin)
+    res <- format(round(100.0 * pt, digits=digits))
+    if (noquote == TRUE) {
+        noquote(res)
+    }
+    else {
+        res
+    }
+}
+
+stats <- function(x, weightvar) {
+	n <- length(x[,1])
+	mean <- mean(x[,1])
+	median <- median(x[,1])
+	wtd_n <- sum(x[,weightvar])
+	wtd_mean <- wtd.mean(x[,1], x[,weightvar])
+	wtd_median <- wtd.quantile(x[,1], x[,weightvar], probs = c(0.5))
+	c(n, mean, median, wtd_n, wtd_mean, wtd_median)
+}
+
+statnames <- c("n", "mean", "median", "wtd_n", "wtd_mean", "wtd_median")
+
+
+
+###
+### Recodes
+###
+
+# missing values
+acs$incwage[acs$incwage==999999] <- NA
+
+# rescale sample weights
+acs$wgt_p <- 1.0 * acs$perwt * length(acs$perwt) / sum(acs$perwt)
+
+
+###
+### Table of occupations
+### 
+
+# ### OCC
+# 1005	Computer and information research scientists
+# 1006	Computer systems analysts
+# 1007	Information security analysts
+# 1010	Computer programmers
+# 1020	Software developers, applications and systems software
+# 1030	Web developers
+# 1050	Computer support specialists
+# 1060	Database Administrators
+# 1105	Network and Computer Systems Administrators
+# 1106	Computer network architects
+# 1107	Computer occupations, all other
+
+
+# tech workers represent 2.4% of US pop 16+
+sum(acs$perwt[acs$occ != 0])
+sum(acs$perwt[acs$occ %in% c(1005,1006,1007,1010,1020,1030,1050,1060,1105,1106,1107)])
+
+
+
+###
+### Age by occupation
+###
+
+g1 <- ggplot(data=subset(acs, acs$occ != 0), aes(x=age, weight=perwt)) +
+	geom_bar(stat="count", colour="#685e5e", fill="#d17575") +
+	scale_x_continuous() +
+	scale_y_continuous(labels=comma) +
+	labs(x="", y="", title="ACS 2015 Age Distribution for all Occupations")
+ggsave(plot = g1, file="pub/acs/img-1.png", width=5, height=5, scale=1, dpi=72, units="in")
+
+# table of age by occupation
+t1 <- acs[acs$occ != 0, c("age", "wgt_p", "occ")]
+occ.age <- summarize(t1, by=list(occ=t1$occ), FUN=stats, weightvar="wgt_p", stat.name=statnames)
+t1a <- acs[acs$occ != 0, c("age", "perwt", "occ")]
+n.age <- summarize(t1a, by=list(occ=t1a$occ), FUN=stats, weightvar="perwt", stat.name=statnames)
+t2 <- merge(x=occ.age, y=occlabs, by.x="occ", by.y="value", all.x=TRUE)
+n.age2 <- n.age[,c("occ", "wtd_n")]
+t3 <- merge(x=t2, y=n.age2, by="occ", all.x=TRUE)
+t4 <- t3[,c("occ", "label", "wtd_n.y", "wtd_mean", "wtd_median")]
+t4$wtd_n.y <- comma(round(t4$wtd_n.y, 0))
+t4$wtd_mean <- myround(t4$wtd_mean, 1)
+t4$wtd_median <- myround(t4$wtd_median, 1)
+write.table(t4, file="~/tmp/occ_age.md", row.names=FALSE, quote=FALSE, sep="|")
+system("pandoc ~/tmp/occ_age.md -f markdown -t html -s -o occ-age.html")
+
+# overall mean and median
+t1 <- acs[acs$occ != 0 & acs$wkswork2 == 6 & acs$uhrswork >= 35, c("age", "wgt_p", "occ")]
+wtd.mean(t1[,1], t1[,"wgt_p"])
+wtd.quantile(t1[,1], t1[,"wgt_p"], probs = c(0.5))
+
+
+facet_labels <- c(
+	"1005" = "Computer and information\nresearch scientists",
+	"1006" = "Computer systems analysts",
+	"1007" = "Information security analysts",
+	"1010" = "Computer programmers",
+	"1020" = "Software developers, applications\nand systems software",
+	"1030" = "Web developers",
+	"1050" = "Computer support specialists",
+	"1060" = "Database Administrators",
+	"1105" = "Network and Computer\nSystems Administrators",
+	"1106" = "Computer network architects",
+	"1107" = "Computer occupations, all other"
+)
+
+g2 <- ggplot(data=subset(acs, acs$occ %in% c(1005,1006,1007,1010,1020,1030,1050,1060,1105,1106,1107)), aes(x=age, weight=perwt)) +
+	geom_bar(stat="count", colour="#685e5e", fill="#d17575") +
+	facet_wrap(~ occ, ncol=3, scales="free_y", labeller=labeller(occ = facet_labels)) +
+	scale_x_continuous() +
+	scale_y_continuous(labels=comma) +
+	labs(x="", y="", title="ACS 2015 Age Distribution in Tech Occupations")
+ggsave(plot = g2, file="pub/acs/img-2.png", width=11, height=11, scale=1, dpi=72, units="in")
+
+
+agedist.by.occ <- function(occvalue) {
+	occlabel <- occlabs$label[occlabs$value==occvalue]
+	g1 <- ggplot(data=subset(acs, acs$occ == occvalue), aes(x=age, weight=perwt)) +
+		geom_bar(stat="count", colour="#685e5e", fill="#d17575") +
+		scale_x_continuous() +
+		scale_y_continuous(labels=comma) +
+		labs(x="", y="", title=paste0("ACS 2015 Age Distribution (Weighted)\n", occlabel, " (", occvalue, ")"))
+	ggsave(plot = g1, file=paste0("ACS 2015 Age Distribution for OCC ", occvalue, ".png"))
+	g1
+}
+
+agedist.by.occ(1005)
+agedist.by.occ(1006)
+agedist.by.occ(1007)
+agedist.by.occ(1010)
+agedist.by.occ(1020)
+agedist.by.occ(1030)
+agedist.by.occ(1050)
+agedist.by.occ(1060)
+agedist.by.occ(1105)
+agedist.by.occ(1106)
+agedist.by.occ(1107)
+
+summary(acs$age)
+summary(acs$age[acs$occ != 0])
+summary(acs$age[acs$occ==1005])
+summary(acs$age[acs$occ==1006])
+summary(acs$age[acs$occ==1007])
+summary(acs$age[acs$occ==1010])
+summary(acs$age[acs$occ==1020])
+summary(acs$age[acs$occ==1030])
+summary(acs$age[acs$occ==1050])
+summary(acs$age[acs$occ==1060])
+summary(acs$age[acs$occ==1105])
+summary(acs$age[acs$occ==1106])
+summary(acs$age[acs$occ==1107])
+
+
+###
+### Income by age
+###
+
+table(acs$wkswork2)
+table(acs$uhrswork)
+summary(acs$incwage)
+
+t1 <- acs[acs$age >= 18 & acs$age <= 65 & acs$wkswork2 == 6 & acs$uhrswork >= 35, c("incwage", "wgt_p", "age")]
+t2 <- summarize(t1, by=list(age=t1$age), FUN=stats, weightvar="wgt_p", stat.name=statnames)
+t3a <- t2[,c("age", "wtd_mean")]
+names(t3a) <- c("age", "y")
+t3a$metric <- "Mean"
+t3b <- t2[,c("age", "wtd_median")]
+names(t3b) <- c("age", "y")
+t3b$metric <- "Median"
+t3 <- rbind(t3a, t3b)
+
+g3 <- ggplot(data=t3, aes(x=age, y=y, colour=metric)) +
+	geom_line(stat="identity") +
+	scale_x_continuous() +
+	scale_y_continuous(labels=dollar) +
+	theme(legend.title=element_blank(), legend.position="bottom") +
+	labs(x="", y="", title="ACS 2015 Earned Income by Age\nFull-time Year-round workers\nAll Occupations")
+ggsave(plot = g3, file="pub/acs/img-3.png", width=5, height=5, scale=1, dpi=72, units="in")
+
+
+t1 <- acs[acs$age >= 18 & acs$age <= 65 & acs$wkswork2 == 6 & acs$uhrswork >= 35 & acs$occ %in% c(1005,1006,1007,1010,1020,1030,1050,1060,1105,1106,1107), 
+	c("incwage", "wgt_p", "age", "occ")]
+t2 <- summarize(t1, by=list(age=t1$age, occ=t1$occ), FUN=stats, weightvar="wgt_p", stat.name=statnames)
+t3a <- t2[,c("age", "wtd_mean", "occ")]
+names(t3a) <- c("age", "y", "occ")
+t3a$metric <- "Mean"
+t3b <- t2[,c("age", "wtd_median", "occ")]
+names(t3b) <- c("age", "y", "occ")
+t3b$metric <- "Median"
+t3 <- rbind(t3a, t3b)
+
+g4 <- ggplot(data=t3, aes(x=age, y=y*0.001, colour=metric)) +
+	geom_line(stat="identity") +
+	facet_wrap(~ occ, ncol=3, scales="free_y", labeller=labeller(occ = facet_labels)) +
+	scale_x_continuous() +
+	scale_y_continuous(labels=dollar) +
+	theme(legend.title=element_blank(), legend.position="bottom") +
+	labs(x="", y="(Thousands)", title="ACS 2015 Earned Income by Age\nFull-time Year-round workers\nTech Occupations")
+ggsave(plot = g4, file="pub/acs/img-4.png", width=11, height=11, scale=1, dpi=72, units="in")
+
+
+# income by occ table
+t1 <- acs[acs$occ != 0 & acs$age >= 18 & acs$age <= 65 & acs$wkswork2 == 6 & acs$uhrswork >= 35, c("incwage", "wgt_p", "occ")]
+occ.inc <- summarize(t1, by=list(occ=t1$occ), FUN=stats, weightvar="wgt_p", stat.name=statnames)
+t2 <- merge(x=occ.inc, y=occlabs, by.x="occ", by.y="value", all.x=TRUE)
+
+t4 <- t2[,c("occ", "label", "wtd_mean", "wtd_median")]
+t4 <- t4[order(-t4$wtd_mean),]
+t4$wtd_mean <- dollar(round(t4$wtd_mean, 0))
+t4$wtd_median <- dollar(round(t4$wtd_median, 0))
+write.table(t4, file="~/tmp/occ_inc.md", row.names=FALSE, quote=FALSE, sep="|")
+system("pandoc ~/tmp/occ_inc.md -f markdown -t html -s -o occ-inc.html")
+
+wtd.mean(t1[,1], t1[,"wgt_p"])
+wtd.quantile(t1[,1], t1[,"wgt_p"], probs = c(0.5))
+
+incdist.by.occ <- function(occvalue) {
+	occlabel <- occlabs$label[occlabs$value==occvalue]
+	t1 <- acs[acs$age >= 18 & acs$age <= 65 & acs$wkswork2 == 6 & acs$uhrswork >= 35 & acs$occ == occvalue, c("incwage", "wgt_p", "age")]
+	t2 <- summarize(t1, by=list(age=t1$age), FUN=stats, weightvar="wgt_p", stat.name=statnames)
+	g1 <- ggplot(data=t2, aes(x=age, y=wtd_mean)) +
+		geom_line(stat="identity", colour="#d17575") +
+		scale_x_continuous() +
+		scale_y_continuous(labels=dollar) +
+		labs(x="", y="", title=paste0("ACS 2015 Mean Income by Age\nFull-time Year-round workers\n", occlabel, " (", occvalue, ")"))
+	g1
+	ggsave(plot = g1, file=paste0("ACS 2015 Mean Income by Age for OCC ", occvalue, ".png"))
+	g1
+}
+
+incdist.by.occ(1005)
+incdist.by.occ(1006)
+incdist.by.occ(1007)
+incdist.by.occ(1010)
+incdist.by.occ(1020)
+incdist.by.occ(1030)
+incdist.by.occ(1050)
+incdist.by.occ(1060)
+incdist.by.occ(1105)
+incdist.by.occ(1106)
+incdist.by.occ(1107)
+
+
+### comps
+
+t1 <- acs[acs$age >= 18 & acs$age <= 65 & acs$wkswork2 == 6 & acs$uhrswork >= 35 & acs$occ %in% c(3060, 10, 2100, 4820), 
+	c("incwage", "wgt_p", "age", "occ")]
+# remove outlier
+t1 <- t1[!(t1$age==22 & t1$occ==2100),]
+t2 <- summarize(t1, by=list(age=t1$age, occ=t1$occ), FUN=stats, weightvar="wgt_p", stat.name=statnames)
+t3a <- t2[,c("age", "wtd_mean", "occ")]
+names(t3a) <- c("age", "y", "occ")
+t3a$metric <- "Mean"
+t3b <- t2[,c("age", "wtd_median", "occ")]
+names(t3b) <- c("age", "y", "occ")
+t3b$metric <- "Median"
+t3 <- rbind(t3a, t3b)
+t4 <- merge(x=t3, y=occlabs, by.x="occ", by.y="value", all.x=TRUE)
+
+facet_labels2 <- c(
+	"3060" = "Physicians and Surgeons",
+	"10"   = "Chief executives and legislators",
+	"2100" = "Lawyers, and judges, magistrates,\nand other judicial workers",
+	"4820" = "Securities, Commodities\n and Financial Services Sales Agents"
+)
+
+g5 <- ggplot(data=t4, aes(x=age, y=y*0.001, colour=metric)) +
+	geom_line(stat="identity") +
+	facet_wrap(~ occ, ncol=2, scales="free_y", labeller=labeller(occ = facet_labels2)) +
+	scale_x_continuous() +
+	scale_y_continuous(labels=dollar) +
+	theme(legend.title=element_blank(), legend.position="bottom") +
+	labs(x="", y="(Thousands)", title="ACS 2015 Earned Income by Age\nFull-time Year-round workers\nSelected Professions")
+ggsave(plot = g5, file="pub/acs/img-5.png", width=9, height=9, scale=1, dpi=72, units="in")
+
+
+###
+### Occupation by age
+###
+
+t1 <- acs[acs$age >= 18 & acs$age <= 65 & acs$wkswork2 == 6 & acs$uhrswork >= 35, c("occ", "wgt_p", "age")]
+t1$tech <- ifelse(t1$occ %in% c(1005,1006,1007,1010,1020,1030,1050,1060,1105,1106,1107), 1, 0)
+freq(table(t1$tech))
+t2 <- summarize(cbind(t1$tech, t1$wgt_p), by=list(age=t1$age), FUN=function(y) wtd.mean(y[,1],y[,2]), stat.name = "pct_in_tech")
+pct_in_tech <- sum(t1$wgt_p[t1$tech==1]) / sum(t1$wgt_p)
+g6 <- ggplot(data=t2, aes(x=age, y=pct_in_tech)) +
+	geom_line(stat="identity", colour="#d17575") +
+	geom_hline(yintercept=pct_in_tech, linetype=2, colour="red") + 
+	scale_x_continuous() +
+	scale_y_continuous(labels=percent) +
+	labs(x="", y="", title="ACS 2015 Percent in Tech by Age")
+ggsave(plot = g6, file="pub/acs/img-6.png", width=5, height=5, scale=1, dpi=72, units="in")
+
+
+
+###
+### Employment status by age
+###
+
+table(acs$empstat)
+freq(table(acs$empstat))
+table(acs$empstat[acs$age >= 16])
+table(acs$empstat[acs$occ != 0])
+freq(table(acs$empstat[acs$occ != 0]))
+
+t1 <- acs[acs$occ != 0 & acs$age >= 18 & acs$age <= 65,c("empstat", "wgt_p", "occ")]
+t1$pct_emp <- ifelse(t1$empstat == 1, 1, 0)
+sum(t1$wgt_p * t1$pct_emp) / sum(t1$wgt_p)
+t2 <- t1[t1$occ %in% c(1005,1006,1007,1010,1020,1030,1050,1060,1105,1106,1107),]
+sum(t2$wgt_p * t2$pct_emp) / sum(t2$wgt_p)
+
+t1 <- acs[acs$occ != 0, c("empstat", "wgt_p", "age", "occ")]
+t1$pct_emp <- ifelse(t1$empstat == 1, 1, 0)
+t2 <- t1[,c("pct_emp", "wgt_p", "age", "occ")]
+empstat.age <- summarize(t2, by=list(age=t2$age), FUN=stats, weightvar="wgt_p", stat.name=statnames)
+t2 <- t1[t1$occ %in% c(1005,1006,1007,1010,1020,1030,1050,1060,1105,1106,1107), c("pct_emp", "wgt_p", "age", "occ")]
+tech.empstat.age <- summarize(t2, by=list(age=t2$age), FUN=stats, weightvar="wgt_p", stat.name=statnames)
+t3a <- empstat.age[,c("age", "wtd_mean")]
+t3a$tech <- 0
+t3b <- tech.empstat.age[,c("age", "wtd_mean")]
+t3b$tech <- 1
+t4 <- rbind(t3a, t3b)
+t4$tech_f <- factor(t4$tech, levels=c(0,1), labels=c("All Occupations", "Tech Occupations"))
+
+g7 <- ggplot(data=t4, aes(x=age, y=wtd_mean, colour=tech_f)) +
+	geom_line(stat="identity") +
+	scale_x_continuous(limits = c(18, 65)) +
+	scale_y_continuous(labels=percent) +
+	theme(legend.title=element_blank(), legend.position="bottom") +
+	labs(x="", y="", title="ACS 2015 Percent Employed by Age")
+ggsave(plot = g7, file="pub/acs/img-7.png", width=5, height=5, scale=1, dpi=72, units="in")
+
+
+###
+### Full-time year-round status by age
+###
+
+t1 <- acs[acs$occ != 0 & acs$age >= 18 & acs$age <= 65 & acs$empstat == 1, c("wgt_p", "age", "occ", "wkswork2", "uhrswork")]
+t1$fulltime <- ifelse(t1$wkswork2 == 6 & t1$uhrswork >= 35, 1, 0)
+sum(t1$wgt_p * t1$fulltime) / sum(t1$wgt_p)
+t2 <- t1[t1$occ %in% c(1005,1006,1007,1010,1020,1030,1050,1060,1105,1106,1107),]
+sum(t2$wgt_p * t2$fulltime) / sum(t2$wgt_p)
+
+t1 <- acs[acs$occ != 0 & acs$empstat == 1, c("wgt_p", "age", "occ", "wkswork2", "uhrswork")]
+t1$fulltime <- ifelse(t1$wkswork2 == 6 & t1$uhrswork >= 35, 1, 0)
+t2 <- t1[,c("fulltime", "wgt_p", "age", "occ")]
+fulltime.age <- summarize(t2, by=list(age=t2$age), FUN=stats, weightvar="wgt_p", stat.name=statnames)
+
+t2 <- t1[t1$occ %in% c(1005,1006,1007,1010,1020,1030,1050,1060,1105,1106,1107), c("fulltime", "wgt_p", "age", "occ")]
+tech.fulltime.age <- summarize(t2, by=list(age=t2$age), FUN=stats, weightvar="wgt_p", stat.name=statnames)
+t3a <- fulltime.age[,c("age", "wtd_mean")]
+t3a$tech <- 0
+t3b <- tech.fulltime.age[,c("age", "wtd_mean")]
+t3b$tech <- 1
+t4 <- rbind(t3a, t3b)
+t4$tech_f <- factor(t4$tech, levels=c(0,1), labels=c("All Occupations", "Tech Occupations"))
+
+g8 <- ggplot(data=t4, aes(x=age, y=wtd_mean, colour=tech_f)) +
+	geom_line(stat="identity") +
+	scale_x_continuous(limits = c(18, 65)) +
+	scale_y_continuous(labels=percent) +
+	theme(legend.title=element_blank(), legend.position="bottom") +
+	labs(x="", y="", title="ACS 2015 Percent Employed Full-time,\nYear-round by Age")
+ggsave(plot = g8, file="pub/acs/img-8.png", width=5, height=5, scale=1, dpi=72, units="in")
+
+
+### comps
+
+t1 <- acs[acs$occ != 0 & acs$age >= 18 & acs$age <= 65 & acs$empstat == 1, c("wgt_p", "age", "occ", "wkswork2", "uhrswork")]
+t1$fulltime <- ifelse(t1$wkswork2 == 6 & t1$uhrswork >= 35, 1, 0)
+sum(t1$wgt_p * t1$fulltime) / sum(t1$wgt_p)
+t2 <- t1[t1$occ %in% c(3060, 10, 2100, 4820),]
+t2$wd <- t2$wgt_p * t2$fulltime
+t3a <- aggregate(t2$wd, by=list(occ=t2$occ), FUN=sum)
+t3b <- aggregate(t2$wgt_p, by=list(occ=t2$occ), FUN=sum)
+names(t3b) <- c("occ", "n")
+t4 <- merge(x=t3a, y=t3b, by="occ")
+t4$wx <- t4$x / t4$n
+t4
+
+t1 <- acs[acs$occ != 0 & acs$empstat == 1, c("wgt_p", "age", "occ", "wkswork2", "uhrswork")]
+t1$fulltime <- ifelse(t1$wkswork2 == 6 & t1$uhrswork >= 35, 1, 0)
+t2 <- t1[,c("fulltime", "wgt_p", "age", "occ")]
+fulltime.age <- summarize(t2, by=list(age=t2$age), FUN=stats, weightvar="wgt_p", stat.name=statnames)
+t2 <- t1[t1$occ %in% c(3060, 10, 2100, 4820), c("fulltime", "wgt_p", "age", "occ")]
+comp.fulltime.age <- summarize(t2, by=list(age=t2$age, occ=t2$occ), FUN=stats, weightvar="wgt_p", stat.name=statnames)
+t3 <- merge(x=comp.fulltime.age, y=occlabs, by.x="occ", by.y="value")
+
+
+###
+### Age and industry
+###
+
+# 2015 universe: Persons age 16+ who had worked within the previous five years; not new workers.
+
+# ### IND
+# 6490 	Software publishing
+# 6672 	Internet publishing and broadcasting and web search portals
+# 6680 	Wired telecommunications carriers 
+# 6690 	Telecommunications, except wired telecommunications carriers 
+# 6695 	Data processing, hosting, and related services
+# 6770 	Libraries and archives
+# 6780 	Other information services, except libraries and archives, and internet publishing and broadcasting and web search portals
+
+# 7380 	Computer systems design and related services 
+# 7390 	Management, scientific, and technical consulting services
+# 7460 	Scientific research and development services 
+
+
+# ind counts
+t1 <- acs[acs$ind != 0, c("perwt", "ind")]
+t2 <- summarize(t1, by=list(ind=t1$ind), FUN=stats, weightvar="perwt", stat.name=statnames)
+write.table(t2, file="~/tmp/ind.txt", row.names=FALSE, quote=FALSE, sep="\t")
+
+sum(acs$perwt[acs$ind != 0])
+sum(acs$perwt[acs$ind %in% c(6490,6672,6680,6690,6695,6780,7380,7390,7460)])
+
+# occ and ind counts
+t1 <- acs[acs$ind != 0 & acs$occ != 0, c("perwt", "ind", "occ")]
+t1$techocc <- ifelse(t1$occ %in% c(1005,1006,1007,1010,1020,1030,1050,1060,1105,1106,1107), 1, 0)
+t1$techind <- ifelse(t1$ind %in% c(6490,6672,6680,6690,6695,6780,7380,7390,7460), 1, 0)
+
+wtd.table(t1$techocc, weights=t1$perwt)
+wtd.table(t1$techind, weights=t1$perwt)
+crosstab(xtabs(t1$perwt ~ t1$techocc + t1$techind), margin=2)
+
+sum(t1$perwt[t1$techocc==1 & t1$techind==1]) / sum(t1$perwt[t1$techind==1])
+sum(t1$perwt[t1$techocc==1 & t1$techind==1]) / sum(t1$perwt[t1$techocc==1])
+length(t1$perwt[t1$techocc==1 & t1$techind==1])
+
+# age by ind
+
+t1 <- acs[acs$ind != 0, c("age", "wgt_p", "ind")]
+ind.age <- summarize(t1, by=list(ind=t1$ind), FUN=stats, weightvar="wgt_p", stat.name=statnames)
+ind.age[ind.age$ind %in% c(6490,6672,6680,6690,6695,6780,7380,7390,7460),]
+
+techind_labels <- c(
+	"6490" = "Software publishing",
+	"6672" = "Internet publishing and\nbroadcasting and web search portals",
+	"6680" = "Wired telecommunications\ncarriers",
+	"6690" = "Telecommunications, except\nwired telecommunications carriers",
+	"6695" = "Data processing, hosting,\nand related services",
+	"6780" = "Other information services",
+	"7380" = "Computer systems design\nand related services",
+	"7390" = "Management, scientific, and\ntechnical consulting services",
+	"7460" = "Scientific research and\ndevelopment services"
+)
+
+g9 <- ggplot(data=subset(acs, acs$ind %in% c(6490,6672,6680,6690,6695,6780,7380,7390,7460)), aes(x=age, weight=perwt)) +
+	geom_bar(stat="count", colour="#685e5e", fill="#d17575") +
+	facet_wrap(~ ind, ncol=3, scales="free_y", labeller=labeller(ind = techind_labels)) +
+	scale_x_continuous() +
+	scale_y_continuous(labels=comma) +
+	labs(x="", y="", title="ACS 2015 Age Distribution in Tech Industries")
+ggsave(plot = g9, file="pub/acs/img-9.png", width=11, height=11, scale=1, dpi=72, units="in")
+
+
+# tech occ in tech ind
+
+t1 <- acs[acs$ind != 0 & acs$occ != 0, c("age", "perwt", "ind", "occ")]
+t1$techocc <- ifelse(t1$occ %in% c(1005,1006,1007,1010,1020,1030,1050,1060,1105,1106,1107), 1, 0)
+t1$techind <- ifelse(t1$ind %in% c(6490,6672,6680,6690,6695,6780,7380,7390,7460), 1, 0)
+t1$tech[t1$techocc == 0 & t1$techind == 0] <- 1
+t1$tech[t1$techocc == 0 & t1$techind == 1] <- 2
+t1$tech[t1$techocc == 1 & t1$techind == 0] <- 3
+t1$tech[t1$techocc == 1 & t1$techind == 1] <- 4
+
+tech_labels <- c(
+	"1" = "NOT Tech Occ and NOT Tech Ind",
+	"2" = "NOT Tech Occ and in Tech Ind",
+	"3" = "In Tech Occ and NOT Tech Ind",
+	"4" = "In Tech Occ and in Tech Ind"
+)
+
+g10 <- ggplot(data=t1, aes(x=age, weight=perwt)) +
+	geom_bar(stat="count", colour="#685e5e", fill="#d17575") +
+	facet_wrap(~ tech, ncol=2, scales="free_y", labeller=labeller(tech = tech_labels)) +
+	scale_x_continuous() +
+	scale_y_continuous(labels=comma) +
+	labs(x="", y="", title="ACS 2015 Age Distribution by Industry and Occupation")
+ggsave(plot = g10, file="pub/acs/img-10.png", width=11, height=11, scale=1, dpi=72, units="in")
+
+summarize(t1, by=list(tech=t1$tech), FUN=stats, weightvar="perwt", stat.name=statnames)
+wtd.quantile(t1$age[t1$tech==4], t1$perwt[t1$tech==4], probs = c(0.5))
+
+
+# pct over 50
+sum(t1$perwt[t1$tech==1 & t1$age >= 50]) / sum(t1$perwt[t1$tech==1])
+sum(t1$perwt[t1$tech==2 & t1$age >= 50]) / sum(t1$perwt[t1$tech==2])
+sum(t1$perwt[t1$tech==3 & t1$age >= 50]) / sum(t1$perwt[t1$tech==3])
+sum(t1$perwt[t1$tech==4 & t1$age >= 50]) / sum(t1$perwt[t1$tech==4])
+
+
+### EOF ###

@@ -1,0 +1,422 @@
+AUTHOR:         Scott Czepiel <sczepiel at gmail dot com>
+
+DATE:           2017-08-28
+
+LICENSE:        GNU Free Documentation License Version 1.2
+
+SYNOPSIS:       Installation and basic usage of Xen Hypervisor on LFS.
+
+DESCRIPTION:    In this hint we will install the latest Xen Project hypervisor
+                and demonstrate how to use an LFS system as the host (dom0) and
+                guest (domU) running under Xen.
+
+PREREQUISITES:  * A working LFS system (this hint was developed on LFS 8.0)
+                * A separate /boot partition
+                * Extra unpartitioned space in which to prepare a guest OS
+                * Grub managed using /boot/grub/grub.cfg.  It is strongly
+                encouraged to avoid using grub-mkconfig.
+
+HINT:
+
+The Xen project is a highly popular, actively maintained open source
+virtualization hypervisor with excellent support for linux as both host and
+guest operating systems, powering many of the world's top virtualization and
+cloud computing platforms.  Xen is a type-1 hypervisor and its operation and
+terminology is different from other type-2 hypervisors that you may be familiar
+with, such as KVM/qemu and Virtualbox.  A type-1 hypervisor runs on the bare
+metal, as distinguished from a type-2 hypervisor which runs as a process inside
+the host operating system.  The essential difference is that Xen is booted
+directly from the boot manager, before your host OS kernel.  After initializing,
+Xen chain boots the host OS, known in Xen terminology as "dom0" -- in
+Xen, virtualized operating systems are referred to as domains.  Domain 0, as the
+first OS to be loaded, is a "privileged guest" domain, it is the only domain
+which can talk to the Xen hypervisor and manage the lifecycle of subsequent
+unprivileged domains, referred to as domU.  This architecture is both more
+secure and more performant than type-2 virtualization platforms.  
+
+The mode of virtualization under which a guest domain runs can range on a
+spectrum between paravirtualized (PV) and hardware-assisted virtualization 
+(HVM).  This distinction concerns the mechanisms and drivers with which
+a guest domain obtains hardware access from the hypervisor, such as CPU time,
+memory, network and disk I/O.  In general, paravirtualization achieves
+better performance but requires modifications to the guest OS.  Fortunately, in
+linux, the only modifications required to take advantage of PV drivers can be
+made by enabling certain configuration options in the kernel.  Despite being
+slower, HVM remains useful because the guest OS can run without modification. 
+This is necessary for some guests, such as Windows, where it is not possible to
+modify the kernel. Xen can run any flavor of PV or HVM guests even
+simultaneously.  Note, however, that HVM requires a CPU that supports
+virtualization extensions (Intel VT-x or AMD-V) and to have these extensions
+enabled in the BIOS.  PV mode does not require these extensions.
+
+The instructions in this hint will build a guest domain based on LFS using a
+kernel which can run paravirtualized drivers.  The PV/HVM spectrum is a complex
+topic and a constant source of change and there is a great deal more about this
+topic on the wiki.
+
+https://wiki.xenproject.org/wiki/Xen_Project_Software_Overview
+
+Following is a brief outline of all the steps required to build the
+latest Xen (4.9.0) on the latest LFS (8.0) as of the writing of this hint.
+
+0. Take a snapshot of your working LFS root filesystem by creating a tar archive
+   which will be used to create our first domU.  See the appendix below for more
+   details.
+
+
+1. Install the following BLFS packages and their prerequisites:
+
+  * Python 2 or 3
+  * OpenSSL
+  * CMake (recommended for libyajl)
+  * Ruby (recommended for libyajl)
+  * GLib
+  * Pixman
+  * bridge-utils
+
+    Note: after installing bridge-utils, in /etc/sysconfig/ifconfig.br0 change
+    the interface name to the following:
+
+    IFACE=xenbr0
+
+    You should now stop your original interface and bring up the bridge:
+
+    ifdown eth0 (or whatever your primary interface is named)
+    ifup br0
+
+    Follow the usual procedures for enabling the bridge interface to run at boot
+    time instead of the standard interface.
+
+
+2. Obtain and install the following packages not found in BLFS:
+
+  * libyajl
+  * libaio
+  * ACPI ASL compiler (iasl)
+  * Dev86
+
+  Please see the appendix for detailed build notes on each of these packages.
+
+
+3. Obtain and build the Xen Project source code
+
+  Xen project source code is available on the downloads page:
+  https://www.xenproject.org/downloads.html
+
+  The README file in the source distribution for Xen 4.9.0 lists all the
+  prerequisites for building Xen from source.  Several requirements are already
+  satisfied in a base LFS system.  There are two additional prerequisites listed
+  in the README that I did not include in the steps above:
+
+  * Development install of x11 (e.g. xorg-x11-dev)
+  * Libc multiarch package (e.g. libc6-dev-i386 / glibc-devel.i686).
+
+  These are listed as required but I could not trace the source of the
+  dependency and was able to build Xen completely without any X or multilib
+  packages.  My hunch is that if Xen detects that an X Window System is present,
+  it will build additional tools requiring the development libraries.  However,
+  you can absolutely build all of Xen without needing X.  I was also unable to
+  determine why multiarch was listed as a requirement.  Perhaps if you need to
+  build paravirtual drivers for 32-bit guest domains I could see this being
+  necessary, but I encountered no issues building Xen having only pure 64-bit
+  libraries.
+
+  Fortunately, satisfying the dependencies above was the hard part, and the
+  actual building of Xen should be very smooth at this point.  Note that the Xen
+  developers recommend performing *all* steps as root.
+
+  ./configure 
+  make world
+  make install
+
+  I encountered a bug in the generated Makefile in the tools directory which
+  caused the build to fail complaining that gthread 2.0 from glib was not
+  found.  To fix this, run the following after configure and before running make
+  world (assuming glib was installed in /usr/lib):
+
+  sed -i 's|\(PKG_CONFIG_PATH=$(XEN_ROOT)/tools/pkg-config\)|\1:/usr/lib/pkgconfig|' tools/Makefile
+
+  After running this, pkg_config will correctly find glib and the version check
+  for gthread will pass.
+
+  Before running 'make install' you can check out the build in the 'dist'
+  directory.
+
+
+4. Build dom0 and domU kernels
+
+  Now, we're going to build two new kernels, one for dom0 and another for domU.
+  There's a handy checklist of the required kernel options at the Xen wiki:
+
+  https://wiki.xenproject.org/wiki/Mainline_Linux_Kernel_Configs
+
+  The Xen kernel config options are scattered all around the kernel tree so it
+  may take some hunting to find them.  While in 'make menuconfig', use '/' to
+  search for an option if you're unsure where to find it.  Note that many
+  options will not appear until you first select CONFIG_HYPERVISOR_GUEST, under
+  "Processor type and features -> Linux guest support".
+
+  It's possible to use the same kernel for both privileged and unprivileged
+  domains, using a superset of the different configuration options, but since we
+  have the freedom to create custom tailored kernels you will likely achieve
+  better performance (and privilege separation) with separate kernels. 
+
+  I recommend appending a custom version string to your kernels to easily
+  identify them with 'uname -a', do this in "General setup -> Local version". 
+  For example, use "-xen-dom0" and "-xen-domU".
+
+  Don't forget you'll need CONFIG_BRIDGE in your dom0 if you didn't already do
+  this when installing bridge-utils.  Copy the image, system map and config to
+  the /boot partition as explained in the LFS kernel build section.  Then,
+  create a new grub entry which will first boot the Xen hypervisor and then
+  chain boot your Xen dom0 kernel:
+
+  # vim /boot/grub/grub.cfg
+  menuentry "LFS 8.0, Xen 4.9.0" {
+          multiboot /xen.gz placeholder
+          module   /vmlinuz-4.9.40-xen-dom0 placeholder root=/dev/sdc2 ro
+  }
+
+  Be sure to specify your actual LFS root partition if it's someplace besides
+  /dev/sdc2.
+
+  Reboot into Xen then start the xencommons daemon.  For SysV:
+
+  # /etc/rc.d/init.d/xencommons start
+
+  Follow the usual procedures to enable this daemon at boot time.  Now verify
+  that the hypervisor is running and your dom0 kernel is aware of it:
+
+  # cat /proc/xen/capabilities
+
+  This should print "control_d".  If so, continue to the next step.
+
+
+5. Prepare a domU partition
+
+  There are many options for where to store the guest domain images.  They can
+  be on a separate physical partition, an LVM partition, or even a regular file
+  in the dom0 filesystem.  In this hint, we will use a standard physical
+  partition.  LVM is preferable due to its flexibility, and the instructions are
+  very similar, but requires a few additional steps so we will start with a
+  standard partition.
+
+  Create a new partition from available unpartitioned space large enough to
+  store your LFS snapshot when uncompressed.  You may also want to create a swap
+  partition specifically for your new guest OS.  Unlike dual-booting, when
+  running guest OSs, each one will need its own dedicated swap partition if
+  memory allocated to it by the hypervisor will be exceeded.
+
+  At this point you can proceed to install any linux distribution onto the new
+  partition if you'd like to use that as your guest OS instead, but in this hint
+  we will use the LFS snapshot created earlier.  Mount the new partition, copy
+  your snapshot to it, and expand it, for example:
+
+  mount -v -t ext4 /dev/sdc12 /mnt/xenguest
+  cp /var/backups/lfs-8.0-snapshot.tgz /mnt/xenguest/
+  cd /mnt/xenguest
+  tar xzpf lfs-8.0-snapshot.tgz
+
+  Now, a few additional steps are necessary to turn this snapshot into a
+  full-fledged linux system of its own.  As root, and from the top-level of your
+  new partition, run the following to finish setting up the filesystem:
+
+  mkdir -pv {dev,proc,sys,run}
+  mkdir -pv mnt
+  mkdir -pv media/{floppy,cdrom}
+  install -dv -m 1777 tmp
+  ln -sv run var/run
+  ln -sv run/lock var/lock
+  mknod -m 600 dev/console c 5 1
+  mknod -m 666 dev/null c 1 3
+  mkdir -v boot
+
+  Next, the following three files will need to be customized to run our guest
+  OS.  Be very careful to run these from the root of the new partition so you
+  don't inadvertantly edit the corresponding files on your primary system!
+
+  # vim etc/fstab
+
+  /dev/xvda1     /            ext4     defaults            1     1
+
+  By default, Xen exposes the root filesystem of the guest partition as
+  /dev/xvda1.  Remember, the domU will not have access to the raw devices on the
+  host hardware, so do not use the actual partition as it is known in your host
+  system.  Also, be sure to keep all the lines in fstab for the virtual
+  filesystems: proc, sysfs, devpts, tmpfs, and devtmpfs.
+
+  # vim etc/inittab
+
+  Replace the first agetty line with the following, and comment out or delete
+  the lines 2 through 6:
+
+  1:2345:respawn:/sbin/agetty --noclear hvc0 9600
+
+  The important concept here is that the guest OS does not have access to
+  the real ttys, instead we can only access a virtual console called hvc0.
+
+  # vim etc/sysconfig/ifconfig.eth0
+
+  By default in bridged networking, Xen will make available the first ethernet
+  interface to domU as eth0.  So, regardless of how your NIC is named on your
+  host system, the guest will need a configuration for eth0.  Make sure you have
+  IFACE=eth0 in this file.  If using static IPs, make sure to give the domU a
+  different IP address than what you are using on your host system.
+
+  You may want to edit some other files as well, to customize and differentiate
+  the guest OS from your host OS.  For example, etc/passwd, etc/hostname,
+  etc/group, etc. ;)
+
+
+6. Create and launch a domU guest
+
+  Now we're all ready to create our first domU.  Go back to your host filesystem
+  and as root, create the configuration file for the guest.  You can save this
+  file in /root for testing.
+
+  # vim xenguest1.cfg 
+  kernel = "/boot/vmlinuz-4.9.40-xen-domU"
+  memory = 1024
+  name = "xenguest1"
+  vif = [ '' ]
+  disk = ['phy:/dev/sdc12,xvda1,w']
+  root = "/dev/xvda1 ro"
+
+  The 'kernel' line should point to the domU kernel you built earlier.  This is
+  saved in the /boot partition of your host filesystem.  We created a boot
+  directory in the new guest partition but it is empty.  Due to the way that Xen
+  "boots" unprivileged domains, there's no need for the guest to have anything
+  in its /boot directory.
+
+  In the 'disk' line, specify a mapping from the physical partition (substitute
+  '/dev/sdc12' for the name of the new partition you created for your guest)
+  to the virtual disk 'xvda1'.  For more information on this cryptic syntax, I
+  can only refer you to the man page for the xl disk configuration:
+
+  http://xenbits.xen.org/docs/4.9-testing/man/xl-disk-configuration.5.html
+
+  Ok, let's fire it up!  Run the following command to "boot" the guest OS and
+  attach to its virtual console:
+
+  # xl create xenguest1.cfg -c
+
+  You should be able to login with the same credentials, since this is a
+  snapshot of your original system.  Check out dmesg and you should see that the
+  system was "booted" via Xen:
+
+  Hypervisor detected: Xen
+
+  You should also see that you have 1GB of memory, since this is how much we
+  allocated to the guest in the configuration file.  df -h should show you the
+  guest partition as /dev/root.
+
+  Back in your dom0 system, by running xl list you should now see that the guest
+  is running in addition to the host.  xl top will give you a handy list of
+  guests running and their current usage of CPU and memory.
+
+  At this point, the sky is the limit, an appropriate metaphor as you begin
+  your journey into cloud computing!  There's a lot more to learn and the Xen
+  wiki should give you some ideas, best practices, and links to more
+  documentation.
+
+
+APPENDIX:
+
+A. Taking a snapshot of your working LFS system.
+
+  Not only will this snapshot serve as the foundation for our guest OS, it is
+  also a good idea to do this before embarking on the Xen build so that you have
+  a clean snapshot of your system to roll back to in case anything goes wrong.
+
+  There are several ways to create a snapshot, my approach is based on the
+  "Backing up LFS" Hint by Mike McCarty.  The basic procedure is as follows:
+
+  * boot into single-user mode
+  * mount filesystems read-only
+  * check filesystems
+  * remount /var as rw (if separate partition), all others as ro
+  * create tar archive file:
+
+  mkdir /var/backups
+  cd /
+  tar czpf /var/backups/lfs-8.0-snapshot.tgz \
+      --exclude=/var/backups  \
+      --exclude=/boot         \
+      --exclude=/dev          \
+      --exclude=/lost+found   \
+      --exclude=/var/lost+found   \
+      --exclude=/media        \
+      --exclude=/mnt          \
+      --exclude=/proc         \
+      --exclude=/run          \
+      --exclude=/sys          \
+      --exclude=/tmp          \
+      /
+
+  Exclude any additional partitions you may have mounted that shouldn't be part
+  of the backup.  Also, exclude the 'lost+found' directory for any ext2/3/4
+  filesystems if you have separate partitions for sub-directories of your root
+  filesystem tree.
+
+B. Build notes for packages not found in BLFS.
+
+  * libyajl - a fast JSON parser
+
+    Homepage: https://lloyd.github.io/yajl/
+    Download: http://github.com/lloyd/yajl/tarball/2.1.0
+
+    # If you have cmake and ruby, otherwise see the INSTALL file:
+    ./configure
+    make install
+
+  * libaio - Linux kernel AIO access library
+
+    Homepage: https://packages.debian.org/sid/libaio1
+    Download:
+    http://http.debian.net/debian/pool/main/liba/libaio/libaio_0.3.110.orig.tar.gz
+
+    I could not find an upstream source package for libaio, what worked for me
+    was the above source package from debian.  Xen requires at least version
+    0.3.107.
+
+    # test to see what gets built:
+    make prefix=`pwd`/usr install
+
+    # build and install directly to /usr
+    make prefix=/usr install
+
+  * ACPI ASL compiler (iasl) - provides ACPI tools
+
+    Homepage: https://www.acpica.org/downloads
+    Download: https://acpica.org/sites/acpica/files/acpica-unix-20170728.tar.gz
+
+    make clean
+    make
+    make install
+
+  * Dev86 - C compiler, assembler and linker for 8086
+
+    The Xen README lists "16-bit x86 assembler, loader and compiler" as an
+    optional prerequisite, but Xen would not compile on my LFS 8.0 system
+    without this package.
+
+    Homepage: http://v3.sk/~lkundrak/dev86/
+    Download: http://v3.sk/~lkundrak/dev86/Dev86src-0.16.21.tar.gz
+
+    make
+    make install
+ 
+
+ACKNOWLEDGEMENTS:
+  * The XLFS (Xen & Linux from Scratch) homepage documents a series of scripts
+  that automates the entire process of building LFS, Xen, and creating guest
+  domains.  It is hard-coded to an older version of LFS, but still highly
+  relevant and you can see all the source code on github with an excellent
+  explanation of how the author (qrux) got everything working.
+
+  http://xenfromscratch.org/
+  https://github.com/qrux/xlfs
+
+CHANGELOG:
+[2017-08-28]
+  * Initial hint.

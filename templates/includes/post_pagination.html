@@ -1,0 +1,14 @@
+<nav>
+  <ul>
+    <li>
+      {% if post.prev_post %}
+        <a href="{{ site.base_url }}{{ post.prev_post.url }}">← {{ post.prev_post.title }}</a>
+      {% endif %}
+    </li>
+    <li>
+      {% if post.next_post %}
+        <a href="{{ site.base_url }}{{ post.next_post.url }}">{{ post.next_post.title }} →</a>
+      {% endif %}
+    </li>
+  </ul>
+</nav>
