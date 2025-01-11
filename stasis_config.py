@@ -18,7 +18,7 @@ SITE = {
     'author_name':  "Scott Czepiel",
     'absolute_url': "https://czep.net",
     'base_url':     "",
-    'twitter':      "@scottcz",
+    'bluesky':      "@czep.net",
     'github':       "https://github.com/czep",
     'links': [
         ("Home", "/"),
@@ -31,7 +31,7 @@ SITE = {
     'rssfeed':      "feed.xml"
 }
 
-PANDOC_ARGS = "markdown+backtick_code_blocks+inline_code_attributes"
+PANDOC_ARGS = "markdown+backtick_code_blocks+inline_code_attributes+tex_math_dollars"
 EXCERPT_SEPARATOR = "<!--excerpt-->"
 TOPICS_URL_PREFACE = "topics"
 

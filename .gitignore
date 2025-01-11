@@ -6,7 +6,7 @@
 _dev
 _pub
 /drafts
-post_store.db
+post_store.db*
 
 ### legacy content
 /static/audio
